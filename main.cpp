@@ -1,14 +1,19 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
+#include <Eigen/Dense>
 #include <algorithm>
 #include <format>
 #include <ranges>
+#include <print>
 
 #include <print_cv_types.h>
 
 using namespace cv;
 using namespace std::views;
 using namespace std::ranges;
+using namespace Eigen;
+using std::println;
+using std::print;
 
 struct Octave
 {
@@ -47,6 +52,48 @@ std::pair<std::vector<Mat>, std::vector<Mat>> drawKeypointsAndCombine(std::vecto
     }
 
     return std::make_pair(hconcated, dogs_hconcated);
+}
+
+std::pair<Vector3d, Matrix3d> calcGradWHessian(const Mat &img, const Mat &above, const Mat &below, 
+                                               const double x, const double y) {
+    CV_Assert(img.type() == CV_64F);
+
+    const double Dx = (img.at<double>(y, x+1) - img.at<double>(y, x-1)) / 2.0;
+    const double Dy = (img.at<double>(y+1, x) - img.at<double>(y-1, x)) / 2.0;
+    const double Ds = (above.at<double>(y, x) - below.at<double>(y, x)) / 2.0;
+    // Dxx=D(x+1)−2D(x)+D(x−1)
+    // Dyy=D(y+1)−2D(x)+D(y−1)
+    // Dss=D(s+1)−2D(x)+D(s−1)
+    // Dxy​=(D(x+1,y+1,s)−D(x−1,y+1,s)−D(x+1,y−1,s)+D(x−1,y−1,s)​) / 4
+
+    const double Dxx = img.at<double>(Point2d(x+1, y)) - 2 * img.at<double>(y, x) + img.at<double>(Point2d(x-1, y));
+    const double Dyy = img.at<double>(Point2d(x, y+1)) - 2 * img.at<double>(y, x) + img.at<double>(Point2d(x, y-1));
+    const double Dss = above.at<double>(y, x) - 2 * img.at<double>(y, x) + below.at<double>(y, x);
+
+    const double Dxy = (img.at<double>(Point2d(x+1, y+1)) - img.at<double>(Point2d(x-1, y+1)) - 
+                    img.at<double>(Point2d(x+1, y-1)) + img.at<double>(Point2d(x-1, y-1))) 
+                    / 4.0;
+
+    const double Dxs = (above.at<double>(y, x+1) - above.at<double>(y, x-1) 
+                    - below.at<double>(y, x+1) + below.at<double>(y, x-1))  
+                    / 4.0;
+
+    const double Dys = (above.at<double>(y+1, x) - above.at<double>(y-1, x) 
+                - below.at<double>(y+1, x) + below.at<double>(y-1, x) ) 
+                    / 4.0;
+    // H= ​Dxx​ Dxy​ Dxs​
+    //    ​Dxy ​Dyy​ Dys​​
+    //    Dxs ​Dys​ Dss​​​
+    Eigen::Matrix3d Hessian;
+    Hessian << Dxx, Dxy, Dxs, 
+                Dxy, Dyy, Dys,
+                Dxs, Dys, Dss;
+    
+    Eigen::Vector3d Gradient;
+    Gradient << Dx, Dy, Ds;      
+    
+    return std::make_pair(Gradient, Hessian); 
+
 }
 
 
@@ -288,8 +335,51 @@ int main()
         }
     }
 
-    // visualize
+    // now need subpixel refinment, basically imagine point in 3d with the adjacent DoG's above and below
+    // you have 26 points around (9 above/below, 8 around), so you have x, y, s (scale, essentially z)
+    // you found local a maximum in the keypoint but say in 1d you had
+    // imagine 3 pixels in a line 0.5, 0.8, 0.6, we found max at 0.8 but "real" max is actually slightly closer to 0.6 than 0.5 (assuming like a curve, plot on desmos if don't remeber) 
+    // basically do this for 3d, find gradient, hessian, and solve for what vector gives the optimal offsets
+    // if any of those offsets are more than 0.5 pixel away, start from that pixel and try again up to 5 times
+    for (auto &octave : octaves)
+    {
+        for (auto [idx, keypoints] : octave.keypoints | enumerate)
+        {
+            // no above/below image to comapare to or no keypoints
+            if (idx == 0 || idx == octave.blurs.size() - 1 || keypoints.empty()) {continue;}
+            
+            const auto below = octave.blurs[idx-1];
+            const auto above = octave.blurs[idx+1];
+            const auto img = octave.blurs[idx];
+            std::vector<cv::KeyPoint> kept;
+            for (auto &kpt : keypoints) {
+                
+                auto x = kpt.pt.x;
+                auto y = kpt.pt.y;
 
+                for (auto i : views::iota(0, 5)) {
+                    auto [Gradient, Hessian] = calcGradWHessian(img, above, below, x, y);
+                    // H · Δx = -∇D
+                    Eigen::Vector3d result = Hessian.colPivHouseholderQr().solve(-Gradient);
+                    if (result(0) > 0.5 || result(1) > 0.5 || result(2) > 0.5) {
+                        // move pixels and try again
+                    }
+                    else {
+                        x += result(0);
+                        y += result(1);
+                        double s;
+                        
+                        continue;
+                    }
+                }
+                std::cout << "Tried 5 times and could not refine keypoint";
+
+            }
+            keypoints = std::move(kept);
+        }   
+    }
+
+    // visualize
     std::tie(hconcated, dogs_hconcated) = drawKeypointsAndCombine(octaves);
     all_blurs = vstackDiffWidths(hconcated);  
     cv::imwrite("all_keypoints.png", all_blurs); 
