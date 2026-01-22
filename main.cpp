@@ -12,8 +12,7 @@ using namespace cv;
 using namespace std::views;
 using namespace std::ranges;
 using namespace Eigen;
-using std::println;
-using std::print;
+// using std::println;
 
 struct Octave
 {
@@ -341,38 +340,69 @@ int main()
     // imagine 3 pixels in a line 0.5, 0.8, 0.6, we found max at 0.8 but "real" max is actually slightly closer to 0.6 than 0.5 (assuming like a curve, plot on desmos if don't remeber) 
     // basically do this for 3d, find gradient, hessian, and solve for what vector gives the optimal offsets
     // if any of those offsets are more than 0.5 pixel away, start from that pixel and try again up to 5 times
+    
+    // blurs <0, 1, 2, 3, 4, 5> imgs
+    // DoGs    <0, 1, 2, 3, 4>  DoGs  
+    // Kpts    <0, 1, 2, 3, 4>  Kpts
+    // going to end up with 3 levels of usable keypoints  
     for (auto &octave : octaves)
     {
         for (auto [idx, keypoints] : octave.keypoints | enumerate)
         {
             // no above/below image to comapare to or no keypoints
-            if (idx == 0 || idx == octave.blurs.size() - 1 || keypoints.empty()) {continue;}
+            if (idx == 0 || idx == octave.DoGs.size() - 1 || keypoints.empty()) {continue;}
             
-            const auto below = octave.blurs[idx-1];
-            const auto above = octave.blurs[idx+1];
-            const auto img = octave.blurs[idx];
+
             std::vector<cv::KeyPoint> kept;
             for (auto &kpt : keypoints) {
-                
-                auto x = kpt.pt.x;
-                auto y = kpt.pt.y;
+                double x = kpt.pt.x;
+                double y = kpt.pt.y;
+                double s = idx;
+                bool converged = false;
+
 
                 for (auto i : views::iota(0, 5)) {
+                    const auto& below = octave.DoGs[s-1];
+                    const auto& above = octave.DoGs[s+1];
+                    const auto& img = octave.DoGs[s];
+                    
                     auto [Gradient, Hessian] = calcGradWHessian(img, above, below, x, y);
                     // H · Δx = -∇D
                     Eigen::Vector3d result = Hessian.colPivHouseholderQr().solve(-Gradient);
-                    if (result(0) > 0.5 || result(1) > 0.5 || result(2) > 0.5) {
+                    if (std::abs(result(0)) > 0.5 || std::abs(result(1)) > 0.5 || std::abs(result(2)) > 0.5) {
                         // move pixels and try again
-                    }
+                        int dx = (result(0) > 0.5) - (result(0) < -0.5);
+                        int dy = (result(1) > 0.5) - (result(1) < -0.5);
+                        int ds = (result(2) > 0.5) - (result(2) < -0.5);
+                        x += dx;
+                        y += dy;
+                        s += ds;
+                        std::println("res 1 2 3 {} {} {}", result(0), result(1), result(2));
+
+                        std::println("Dx dy ds {} {} {}", dx, dy, ds);
+                        if (s == 0 || s == octave.DoGs.size() - 1) {
+                            std::println("S is out of bounds with val {}", s);
+                            break;
+                        }
+                        // should maybe go at top of loop since kpt could have started at like 0,0
+                        if (x >= img.cols-1 || y >= img.rows-1 ||
+                            x <= 0 || y <= 0) {     
+                            std::println("X or Y is too close to edge of the image for refinement");
+                            break;
+                        }
+                    } 
                     else {
+                        converged = true;
+                        std::print("Refined point from (x,y,s)=({}, {}, {})", x, y, s);
                         x += result(0);
                         y += result(1);
-                        double s;
-                        
-                        continue;
+                        s += result(2);
+                        std::println(" to ({}, {}, {})\n", x, y, s);
+                        kept.emplace_back(KeyPoint(Point2d(x, y), s, kpt.angle, kpt.response, kpt.octave));
+                        break;
                     }
                 }
-                std::cout << "Tried 5 times and could not refine keypoint";
+                if (!converged) std::println("Tried 5 times and could not refine keypoint");
 
             }
             keypoints = std::move(kept);
