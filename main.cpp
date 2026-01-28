@@ -5,13 +5,16 @@
 #include <format>
 #include <ranges>
 #include <print>
+#include <numbers>
 
+#include <angles.h>
 #include <print_cv_types.h>
 
 using namespace cv;
 using namespace std::views;
 using namespace std::ranges;
 using namespace Eigen;
+using std::numbers::pi;
 // using std::println;
 
 struct Octave
@@ -23,8 +26,9 @@ struct Octave
     std::vector<std::vector<cv::KeyPoint>> keypoints;
 };
 
-// intentional copy 
-std::pair<std::vector<Mat>, std::vector<Mat>> drawKeypointsAndCombine(std::vector<Octave> octaves) {
+// intentional copy
+std::pair<std::vector<Mat>, std::vector<Mat>> drawKeypointsAndCombine(std::vector<Octave> octaves)
+{
     std::vector<Mat> hconcated;
     std::vector<Mat> dogs_hconcated;
 
@@ -38,6 +42,10 @@ std::pair<std::vector<Mat>, std::vector<Mat>> drawKeypointsAndCombine(std::vecto
         {
             img.convertTo(img, CV_8U, 255.0);
             cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
+            if (idx == 0 || idx >= octaves[i].DoGs.size() - 1)
+            {
+                continue;
+            }
             if (octaves[i].keypoints[idx].size() > 0)
             {
                 drawKeypoints(img, octaves[i].keypoints[idx], img, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
@@ -53,56 +61,51 @@ std::pair<std::vector<Mat>, std::vector<Mat>> drawKeypointsAndCombine(std::vecto
     return std::make_pair(hconcated, dogs_hconcated);
 }
 
-std::pair<Vector3d, Matrix3d> calcGradWHessian(const Mat &img, const Mat &above, const Mat &below, 
-                                               const double x, const double y) {
+std::pair<Vector3d, Matrix3d> calcGradWHessian(const Mat &img, const Mat &above, const Mat &below,
+                                               const double x, const double y)
+{
     CV_Assert(img.type() == CV_64F);
 
-    const double Dx = (img.at<double>(y, x+1) - img.at<double>(y, x-1)) / 2.0;
-    const double Dy = (img.at<double>(y+1, x) - img.at<double>(y-1, x)) / 2.0;
+    const double Dx = (img.at<double>(y, x + 1) - img.at<double>(y, x - 1)) / 2.0;
+    const double Dy = (img.at<double>(y + 1, x) - img.at<double>(y - 1, x)) / 2.0;
     const double Ds = (above.at<double>(y, x) - below.at<double>(y, x)) / 2.0;
     // Dxx=D(x+1)−2D(x)+D(x−1)
     // Dyy=D(y+1)−2D(x)+D(y−1)
     // Dss=D(s+1)−2D(x)+D(s−1)
     // Dxy​=(D(x+1,y+1,s)−D(x−1,y+1,s)−D(x+1,y−1,s)+D(x−1,y−1,s)​) / 4
 
-    const double Dxx = img.at<double>(Point2d(x+1, y)) - 2 * img.at<double>(y, x) + img.at<double>(Point2d(x-1, y));
-    const double Dyy = img.at<double>(Point2d(x, y+1)) - 2 * img.at<double>(y, x) + img.at<double>(Point2d(x, y-1));
+    const double Dxx = img.at<double>(Point2d(x + 1, y)) - 2 * img.at<double>(y, x) + img.at<double>(Point2d(x - 1, y));
+    const double Dyy = img.at<double>(Point2d(x, y + 1)) - 2 * img.at<double>(y, x) + img.at<double>(Point2d(x, y - 1));
     const double Dss = above.at<double>(y, x) - 2 * img.at<double>(y, x) + below.at<double>(y, x);
 
-    const double Dxy = (img.at<double>(Point2d(x+1, y+1)) - img.at<double>(Point2d(x-1, y+1)) - 
-                    img.at<double>(Point2d(x+1, y-1)) + img.at<double>(Point2d(x-1, y-1))) 
-                    / 4.0;
+    const double Dxy = (img.at<double>(Point2d(x + 1, y + 1)) - img.at<double>(Point2d(x - 1, y + 1)) -
+                        img.at<double>(Point2d(x + 1, y - 1)) + img.at<double>(Point2d(x - 1, y - 1))) /
+                       4.0;
 
-    const double Dxs = (above.at<double>(y, x+1) - above.at<double>(y, x-1) 
-                    - below.at<double>(y, x+1) + below.at<double>(y, x-1))  
-                    / 4.0;
+    const double Dxs = (above.at<double>(y, x + 1) - above.at<double>(y, x - 1) - below.at<double>(y, x + 1) + below.at<double>(y, x - 1)) / 4.0;
 
-    const double Dys = (above.at<double>(y+1, x) - above.at<double>(y-1, x) 
-                - below.at<double>(y+1, x) + below.at<double>(y-1, x) ) 
-                    / 4.0;
+    const double Dys = (above.at<double>(y + 1, x) - above.at<double>(y - 1, x) - below.at<double>(y + 1, x) + below.at<double>(y - 1, x)) / 4.0;
     // H= ​Dxx​ Dxy​ Dxs​
     //    ​Dxy ​Dyy​ Dys​​
     //    Dxs ​Dys​ Dss​​​
     Eigen::Matrix3d Hessian;
-    Hessian << Dxx, Dxy, Dxs, 
-                Dxy, Dyy, Dys,
-                Dxs, Dys, Dss;
-    
+    Hessian << Dxx, Dxy, Dxs,
+        Dxy, Dyy, Dys,
+        Dxs, Dys, Dss;
+
     Eigen::Vector3d Gradient;
-    Gradient << Dx, Dy, Ds;      
-    
-    return std::make_pair(Gradient, Hessian); 
+    Gradient << Dx, Dy, Ds;
 
+    return std::make_pair(Gradient, Hessian);
 }
-
 
 int main()
 {
 
     std::cout << "Hello" << std::endl;
     std::vector<cv::String> fn;
-    //glob("images/small*", fn, false);
-    glob("images/feature*", fn, false);
+    glob("images/small*", fn, false);
+    // glob("images/gator*", fn, false);
 
     std::vector<Mat> images;
     size_t count = fn.size();
@@ -200,13 +203,14 @@ int main()
     {
         for (auto [idx, img] : octave.DoGs | enumerate)
         {
-            octave.keypoints.emplace_back(); // just keep ones where it has none empty
-            if (idx == 0 || idx == octave.DoGs.size() - 1)
+            // keypoints array already has 5 elements here
+            // -1 is correct because DoGs has s + 3 - 1 (5) elements (s=3 normally)
+            if (idx == 0 || idx >= octave.DoGs.size() - 1)
             {
                 continue;
             }
-            const auto& above = octave.DoGs[idx + 1];
-            const auto& below = octave.DoGs[idx - 1];
+            const auto &above = octave.DoGs[idx + 1];
+            const auto &below = octave.DoGs[idx - 1];
 
             for (int y = 0; y < img.rows; y++)
             {
@@ -247,7 +251,7 @@ int main()
                         continue;
                     }
                     // std::cout << "Found keypoint at " << x << " " << y << "\n";
-                    octave.keypoints[idx].emplace_back(KeyPoint(Point2f(x, y), 5.0, -1, pixel));
+                    octave.keypoints[idx].emplace_back(KeyPoint(Point2f(x, y), 10.0, -1, pixel));
                     // std::cout << "Keypoint size for idx " << idx << " is " << octave.keypoints[idx].size() << "\n";
                 }
             }
@@ -255,8 +259,8 @@ int main()
     }
 
     auto [hconcated, dogs_hconcated] = drawKeypointsAndCombine(octaves);
-    Mat all_blurs = vstackDiffWidths(hconcated);  
-    cv::imwrite("all_keypoints_pre_edge_det.png", all_blurs); 
+    Mat all_blurs = vstackDiffWidths(hconcated);
+    cv::imwrite("all_keypoints_pre_edge_det.png", all_blurs);
 
     // filtering keypoints, based on strenght of response, as well as if its on a line (i.e curvature along x or y is very diff. than the other)
     /*
@@ -275,7 +279,7 @@ int main()
         Det <= 0 (saddle point or flat — not a blob)
         Tr² / Det > 12.1 (edge-like, using r=10)
 
-        12.1 comes from 
+        12.1 comes from
         Tr2​/det=λ1​λ2​(λ1​+λ2​)2​=r(r+1)2​ with r=10
     */
     double threshold_ratio = 10.0;
@@ -286,36 +290,31 @@ int main()
         for (auto [idx, keypoints] : octave.keypoints | enumerate)
         {
             auto inital_len = keypoints.size();
-            for (auto &kpt : keypoints)
-            {
-                // std::cout << "Kpt w Int " << kpt.response << " \n";
-                size_t removed = std::erase_if(keypoints, [&](cv::KeyPoint kpt)
+            size_t removed = std::erase_if(keypoints, [&](const cv::KeyPoint &kpt)
                                            {
-                                            auto pt = kpt.pt;
-                                            auto x = pt.x;
-                                            auto y = pt.y;
-                                            auto DoG = octave.DoGs[idx]; 
-                                            double Dxx = DoG.at<double>(Point2d(x+1, y)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x-1, y));
-                                            double Dyy = DoG.at<double>(Point2d(x, y+1)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x, y-1));
-                                            double Dxy = (DoG.at<double>(Point2d(x+1, y+1)) - DoG.at<double>(Point2d(x-1, y+1)) - 
-                                                          DoG.at<double>(Point2d(x+1, y-1)) + DoG.at<double>(Point2d(x-1, y-1))) 
-                                                          / 4.0;
-                                            auto Tr = Dxx + Dyy;
-                                            auto Det = Dxx * Dyy - Dxy * Dxy;
-                                            if (Det <= 0) return true;
-                                            if (((Tr * Tr) / Det) > tr_cutoff) return true;
-                                            return false;
-                                        });
-                if (removed)
-                    std::cout << "Edge detection filtered " << removed << " points out of " << inital_len << " \n";
-            }
+                                        auto pt = kpt.pt;
+                                        auto x = pt.x;
+                                        auto y = pt.y;
+                                        auto DoG = octave.DoGs[idx]; 
+                                        double Dxx = DoG.at<double>(Point2d(x+1, y)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x-1, y));
+                                        double Dyy = DoG.at<double>(Point2d(x, y+1)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x, y-1));
+                                        double Dxy = (DoG.at<double>(Point2d(x+1, y+1)) - DoG.at<double>(Point2d(x-1, y+1)) - 
+                                                        DoG.at<double>(Point2d(x+1, y-1)) + DoG.at<double>(Point2d(x-1, y-1))) 
+                                                        / 4.0;
+                                        auto Tr = Dxx + Dyy;
+                                        auto Det = Dxx * Dyy - Dxy * Dxy;
+                                        if (Det <= 0) return true;
+                                        if (((Tr * Tr) / Det) > tr_cutoff) return true;
+                                        return false; });
+            if (removed)
+                std::cout << "Edge detection filtered " << removed << " points out of " << inital_len << " \n";
         }
     }
 
     std::tie(hconcated, dogs_hconcated) = drawKeypointsAndCombine(octaves);
-    all_blurs = vstackDiffWidths(hconcated);  
-    cv::imwrite("all_keypoints_pre_thresh.png", all_blurs); 
-    
+    all_blurs = vstackDiffWidths(hconcated);
+    cv::imwrite("all_keypoints_pre_thresh.png", all_blurs);
+
     // threshold
     double threshold = 0.03; // from the guys paper, can tune
     for (auto &octave : octaves)
@@ -337,84 +336,194 @@ int main()
     // now need subpixel refinment, basically imagine point in 3d with the adjacent DoG's above and below
     // you have 26 points around (9 above/below, 8 around), so you have x, y, s (scale, essentially z)
     // you found local a maximum in the keypoint but say in 1d you had
-    // imagine 3 pixels in a line 0.5, 0.8, 0.6, we found max at 0.8 but "real" max is actually slightly closer to 0.6 than 0.5 (assuming like a curve, plot on desmos if don't remeber) 
+    // imagine 3 pixels in a line 0.5, 0.8, 0.6, we found max at 0.8 but "real" max is actually slightly closer to 0.6 than 0.5 (assuming like a curve, plot on desmos if don't remeber)
     // basically do this for 3d, find gradient, hessian, and solve for what vector gives the optimal offsets
     // if any of those offsets are more than 0.5 pixel away, start from that pixel and try again up to 5 times
-    
+
     // blurs <0, 1, 2, 3, 4, 5> imgs
-    // DoGs    <0, 1, 2, 3, 4>  DoGs  
+    // DoGs    <0, 1, 2, 3, 4>  DoGs
     // Kpts    <0, 1, 2, 3, 4>  Kpts
-    // going to end up with 3 levels of usable keypoints  
+    // going to end up with 3 levels of usable keypoints
     for (auto &octave : octaves)
     {
         for (auto [idx, keypoints] : octave.keypoints | enumerate)
         {
             // no above/below image to comapare to or no keypoints
-            if (idx == 0 || idx == octave.DoGs.size() - 1 || keypoints.empty()) {continue;}
-            
+            if (idx == 0 || idx == octave.DoGs.size() - 1 || keypoints.empty())
+            {
+                continue;
+            }
 
             std::vector<cv::KeyPoint> kept;
-            for (auto &kpt : keypoints) {
+            for (auto &kpt : keypoints)
+            {
                 double x = kpt.pt.x;
                 double y = kpt.pt.y;
+                size_t s_idx = idx; // s will get refined and not become an
                 double s = idx;
                 bool converged = false;
 
+                for (auto i : views::iota(0, 5))
+                {
+                    if (s_idx == 0 || s_idx >= octave.DoGs.size() - 1)
+                    {
+                        std::println("S is out of bounds with val {}", s);
+                        break;
+                    }
+                    const auto &below = octave.DoGs[s_idx - 1];
+                    const auto &above = octave.DoGs[s_idx + 1];
+                    const auto &img = octave.DoGs[s_idx];
 
-                for (auto i : views::iota(0, 5)) {
-                    const auto& below = octave.DoGs[s-1];
-                    const auto& above = octave.DoGs[s+1];
-                    const auto& img = octave.DoGs[s];
-                    
                     auto [Gradient, Hessian] = calcGradWHessian(img, above, below, x, y);
                     // H · Δx = -∇D
                     Eigen::Vector3d result = Hessian.colPivHouseholderQr().solve(-Gradient);
-                    if (std::abs(result(0)) > 0.5 || std::abs(result(1)) > 0.5 || std::abs(result(2)) > 0.5) {
+                    if (std::abs(result(0)) > 0.5 || std::abs(result(1)) > 0.5 || std::abs(result(2)) > 0.5)
+                    {
                         // move pixels and try again
                         int dx = (result(0) > 0.5) - (result(0) < -0.5);
                         int dy = (result(1) > 0.5) - (result(1) < -0.5);
                         int ds = (result(2) > 0.5) - (result(2) < -0.5);
                         x += dx;
                         y += dy;
-                        s += ds;
+                        s_idx += ds;
+                        if (ds)
+                            std::println("Need to move blur levels {}", ds);
                         std::println("res 1 2 3 {} {} {}", result(0), result(1), result(2));
 
                         std::println("Dx dy ds {} {} {}", dx, dy, ds);
-                        if (s == 0 || s == octave.DoGs.size() - 1) {
-                            std::println("S is out of bounds with val {}", s);
-                            break;
-                        }
+
                         // should maybe go at top of loop since kpt could have started at like 0,0
-                        if (x >= img.cols-1 || y >= img.rows-1 ||
-                            x <= 0 || y <= 0) {     
+                        if (x >= img.cols - 1 || y >= img.rows - 1 ||
+                            x <= 0 || y <= 0)
+                        {
                             std::println("X or Y is too close to edge of the image for refinement");
                             break;
                         }
-                    } 
-                    else {
+                    }
+                    else
+                    {
                         converged = true;
                         std::print("Refined point from (x,y,s)=({}, {}, {})", x, y, s);
                         x += result(0);
                         y += result(1);
-                        s += result(2);
+                        s = (double)s_idx + result(2);
                         std::println(" to ({}, {}, {})\n", x, y, s);
                         kept.emplace_back(KeyPoint(Point2d(x, y), s, kpt.angle, kpt.response, kpt.octave));
                         break;
                     }
                 }
-                if (!converged) std::println("Tried 5 times and could not refine keypoint");
-
+                if (!converged)
+                    std::println("Tried 5 times and could not refine keypoint");
             }
             keypoints = std::move(kept);
-        }   
+        }
+    }
+
+    // now want to find orientation? of keypoints, angle (0-360) that has which direction the pixels are become the most intense
+    // idea is that if you took the same image but rotated 45 degrees, the features should still be able to be matched, the orientation allows you to have say
+    // feature A with direction 10deg and then rotated 45 deg still will have 55 deg.
+    // importantly when you make the descriptor of the feature, it is relative to this orientation, so the desciptors will both be in the same reference frame regardless of orientation
+    for (auto &octave : octaves)
+    {
+        for (auto [idx, blur_img] : octave.blurs | enumerate)
+        {
+            // keypoints array already has 5 elements here
+            // - 2 comes -1 from size being 1 indexed, -1 from the last element of DoGs doesn't have keypoints since no image to right
+            if (idx == 0 || idx >= octave.DoGs.size() - 1)
+            {
+                continue;
+            }
+
+            auto kpts = octave.keypoints[idx];
+            std::vector<cv::KeyPoint> new_keypoints;
+            new_keypoints.reserve(kpts.size());
+
+            for (auto &kpt : kpts)
+            {
+                // does lose refinement (i.e 100.5) but needed to access pixels
+                int x = kpt.pt.x;
+                int y = kpt.pt.y;
+                // 1.5 is taken from paper (Lowe 2004)
+                double weight_sigma = 1.5 * kpt.size;
+                int radius = std::round(weight_sigma * 3.0); // 3 std dev is enough
+                std::array<double, 36> orientation_hist{};   // each bin is 10 deg and 36 * 10 = 360
+
+                if (x - radius < 0 || x + radius >= blur_img.cols || y - radius < 0 || y + radius >= blur_img.rows)
+                {
+                    std::println("Leaving behind kpt due to orientation going out of bounds");
+                    continue;
+                }
+
+                for (auto dx : views::iota(-radius, radius + 1))
+                {
+                    for (auto dy : views::iota(-radius, radius + 1))
+                    {
+                        double grad_x = (blur_img.at<double>(y + dy, x + dx + 1) - blur_img.at<double>(y + dy, x + dx - 1)) / 2.0;
+                        double grad_y = (blur_img.at<double>(y + dy + 1, x + dx) - blur_img.at<double>(y + dy - 1, x + dx)) / 2.0;
+                        double mag = std::hypot(grad_y, grad_x);
+                        double orientation = std::atan2(grad_y, grad_x) + pi; // get it in [0, 2pi]
+                        double orientation_deg = orientation * 180.0 / pi;
+
+                        // $$ w_{\text{spatial}}(x, y) = \exp\left(-\frac{(x - x_k)^2 + (y - y_k)^2}{2\sigma_w^2}\right) $$
+
+                        // $$ \sigma_w = 1.5 \times \sigma_{\text{keypoint}} $$
+                        int bin = (orientation / pi) * 36.0;
+                        if (bin == 36)
+                            bin = 0;
+                        for (auto bin_idx : {bin - 1, bin, bin + 1})
+                        {
+                            bin_idx += 36; // don't get trolled by bin_idx = -1 and do -1 % 36
+                            bin_idx %= 36;
+                            auto mid_angle_deg = (bin_idx + 1) * 10 - 5; // angle between this bin and the next (5, 15, 25, etc)
+                            auto mid_angle_rad = angles::from_degrees(mid_angle_deg);
+                            auto weight_gaussian = exp(-(pow(dx, 2) + pow(dy, 2)) / (2.0 * pow(weight_sigma, 2))); // closer pixels contribute more
+                            // last term is basically farther from actual angle means less weight with a +- of 1 bucket (10 deg)
+                            auto to_add = mag * weight_gaussian * (1 - (std::abs(angles::shortest_angular_distance(orientation, mid_angle_rad))) 
+                                                                            / angles::from_degrees(10.0));
+                            
+                            // check more than 0 bcs third term above could be negative
+                            if (to_add > 0)
+                                orientation_hist[bin_idx] += to_add;
+                        }
+                    }
+                }
+                auto arr_enum = orientation_hist | std::views::enumerate;
+                // runs the view created by enumerate through max, so that the max element is found with the index
+                auto max_it = std::max_element(arr_enum.begin(), arr_enum.end(), [](std::tuple<int, double> a, std::tuple<int, double> b)
+                                               { return std::get<1>(a) < std::get<1>(b); });
+                auto max_val = std::get<1>(*max_it);
+                size_t max_idx = std::get<0>(*max_it);
+
+
+                std::vector<std::tuple<int, double>> remaining_results = {};
+                
+                const auto max_percent = 0.8; // 80 % of max also considered valid orientation for keypoint
+                std::copy_if(arr_enum.begin(), arr_enum.end(), std::back_inserter(remaining_results), [max_percent, max_val](std::tuple<int, double> a)
+                                               { return std::get<1>(a) > max_percent * max_val; });
+
+                // refine bin using left and right ones (i.e can do better than just bin 4, using bins 5 and 3)
+                
+                // $$ \Delta b = \frac{h[b-1] - h[b+1]}{2(h[b-1] - 2h[b] + h[b+1])} $$
+                
+                // $$ \theta_{\text{refined}} = (b + \Delta b) \cdot 10° = (b + \Delta b) \cdot \frac{\pi}{18} $$ 
+                
+                const auto& h = orientation_hist;
+                const auto dBinNum = h[max_idx-1] - h[max_idx+1];
+                const auto dBinDenom = 2.0 * (h[max_idx-1] - 2.0*h[max_idx] + h[max_idx+1]); 
+                const auto dBin = dBinNum / dBinDenom;
+                const auto theta_refined = (max_idx + dBin) * (pi / 18.0);
+
+                kpt.angle = theta_refined;
+                new_keypoints.push_back(kpt);
+            }
+        }
     }
 
     // visualize
     std::tie(hconcated, dogs_hconcated) = drawKeypointsAndCombine(octaves);
-    all_blurs = vstackDiffWidths(hconcated);  
-    cv::imwrite("all_keypoints.png", all_blurs); 
+    all_blurs = vstackDiffWidths(hconcated);
+    cv::imwrite("all_keypoints.png", all_blurs);
 
-        
     for (int i = 0; i < hconcated.size(); i++)
     {
         imshow(std::format("Size {}", hconcated[i].size().width), hconcated[i]);

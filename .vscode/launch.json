@@ -6,7 +6,7 @@
             "name": "Debug C++",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/HelloWorld",
+            "program": "${workspaceFolder}/build-Debug/HelloWorld",
             "args": ["arg1", "arg2"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
