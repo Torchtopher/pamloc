@@ -48,6 +48,7 @@ std::pair<std::vector<Mat>, std::vector<Mat>> drawKeypointsAndCombine(std::vecto
             }
             if (octaves[i].keypoints[idx].size() > 0)
             {
+                std::println("Angle for kypt {}", octaves[i].keypoints[idx][0].angle); 
                 drawKeypoints(img, octaves[i].keypoints[idx], img, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
             }
         }
@@ -108,105 +109,79 @@ decltype(auto) py_idx(Vec& v, int i) {
 }
 
 
-int main()
-{
+std::vector<Octave> run_SIFT(Mat img) {
 
-    std::cout << "Hello" << std::endl;
-    std::vector<cv::String> fn;
-    glob("images/small*", fn, false);
-    // glob("images/gator*", fn, false);
+    CV_Assert(img.channels() == 3);
 
-    std::vector<Mat> images;
-    size_t count = fn.size();
-    for (size_t i = 0; i < count; i++)
+    cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
+    img.convertTo(img, CV_64F, 1.0 / 255.0);
+    std::cout << "Type: " << type2str(img.type()) << std::endl;
+    double scales = 3.0;
+    double num_octaves = floor(log2(std::min(img.size().width, img.size().height)));
+    double sigma_inital = 1.6;
+    double k = pow(2, (1.0 / scales)); // multipler between levels, so that you
+    std::cout << "Num octaves " << num_octaves << " Sigma inital " << sigma_inital
+                << " K " << k << "\n"
+                << "Image size " << img.size()
+                << "\n";
+    
+    std::vector<Octave> octaves;
+    for (int octave_idx = 0; octave_idx < num_octaves - 1; octave_idx++)
     {
-        std::cout << "Reading image at " << fn[i] << "\n";
-        images.push_back(imread(fn[i]));
-    }
+        Octave octave;
+        Mat base_img;
 
-    std::cout << "Images.size " << images.size() << "\n";
-    std::vector<std::vector<Octave>> octaves;
-
-
-
-    // compute blurs for each image
-    for (int i = 0; i < images.size(); i++)
-    {
-        Mat img;
-        cv::cvtColor(images[i], img, cv::COLOR_BGR2GRAY);
-        img.convertTo(img, CV_64F, 1.0 / 255.0);
-        std::cout << "Type: " << type2str(img.type()) << std::endl;
-        double scales = 3.0;
-        double num_octaves = floor(log2(std::min(img.size().width, img.size().height)));
-        double sigma_inital = 1.6;
-        double k = pow(2, (1.0 / scales)); // multipler between levels, so that you
-        std::cout << "Num octaves " << num_octaves << " Sigma inital " << sigma_inital
-                  << " K " << k << "\n"
-                  << "Image size " << img.size()
-                  << "\n";
-        for (int octave_idx = 0; octave_idx < num_octaves - 1; octave_idx++)
+        if (octave_idx == 0)
         {
-            Octave octave;
-
-            Mat base_img;
-
-            if (octave_idx == 0)
-            {
-                base_img = img.clone();
-            }
-            else
-            {
-                // should be at the blur level of 2x the original, then downsample by 2x to get back to 1.6 sigma
-                auto prev_blurs = octaves[octave_idx - 1].blurs;
-                auto inital = prev_blurs[prev_blurs.size() - 3];
-                pyrDown(inital, base_img);
-                std::cout << "base Type: " << type2str(inital.type()) << std::endl;
-            }
-
-            if (base_img.size().height < 16 || base_img.size().width < 16)
-            {
-                std::cout << "Image too small, breaking out\n";
-                break;
-            }
-
-            for (int scale_idx = 0; scale_idx < scales + 3; scale_idx++)
-            {
-                double sigma = sigma_inital * pow(k, scale_idx);
-                Mat blurred_img;
-                GaussianBlur(base_img, blurred_img, Size(0, 0), sigma);
-                octave.blurs.push_back(blurred_img);
-                octave.sigmas.emplace_back(sigma);
-                std::cout << "Blurred Type: " << type2str(blurred_img.type()) << std::endl;
-
-                // std::cout << "Blur " << octave_idx << " Sigma " << sigma << " Img " << blurred_img.size() << std::endl;
-            }
-
-            // leave out the first and last element because
-            // doing right - left, i.e large blur - small blur
-            for (auto [idx, img] : octave.blurs | enumerate | drop(1))
-            {
-                // std::cout << "idx " << idx << "\n";
-
-                Mat DoG = img - octave.blurs.at(idx - 1);
-                std::cout << "Dog Type: " << type2str(DoG.type()) << std::endl;
-
-                octave.DoGs.push_back(DoG);
-
-                // just for debug
-                Mat dog_visible;
-                double minVal, maxVal;
-                cv::minMaxLoc(DoG, &minVal, &maxVal);
-                double absMax = std::max(std::abs(minVal), std::abs(maxVal));
-                DoG.convertTo(dog_visible, CV_8U, 127.0 / absMax, 128);
-                octave.vis_DoGs.push_back(dog_visible);
-                octave.keypoints.emplace_back();
-                std::cout << "DoG " << idx << " min: " << minVal << " max: " << maxVal << std::endl;
-                // std::cout << "Induvidal vis size " << dog_visible.size() << "\n";
-            }
-            octaves.push_back(octave);
-            // std::cout << "Adding octave at " << octave_idx << "\n";
-            // std::cout << "Dog Vis size " << octave.vis_DoGs.size() << "\n";
+            base_img = img.clone();
         }
+        else
+        {
+            // should be at the blur level of 2x the original, then downsample by 2x to get back to 1.6 sigma
+            auto prev_blurs = octaves[octave_idx - 1].blurs;
+            auto inital = prev_blurs[prev_blurs.size() - 3];
+            pyrDown(inital, base_img);
+            std::cout << "base Type: " << type2str(inital.type()) << std::endl;
+        }
+
+        if (base_img.size().height < 16 || base_img.size().width < 16)
+        {
+            std::cout << "Image too small, breaking out\n";
+            break;
+        }
+
+        for (int scale_idx = 0; scale_idx < scales + 3; scale_idx++)
+        {
+            double sigma = sigma_inital * pow(k, scale_idx);
+            Mat blurred_img;
+            GaussianBlur(base_img, blurred_img, Size(0, 0), sigma);
+            octave.blurs.push_back(blurred_img);
+            octave.sigmas.emplace_back(sigma);
+        }
+
+        // leave out the first and last element because
+        // doing right - left, i.e large blur - small blur
+        for (auto [idx, img] : octave.blurs | enumerate | drop(1))
+        {
+            // std::cout << "idx " << idx << "\n";
+
+            Mat DoG = img - octave.blurs.at(idx - 1);
+            std::cout << "Dog Type: " << type2str(DoG.type()) << std::endl;
+
+            octave.DoGs.push_back(DoG);
+
+            // just for debug
+            Mat dog_visible;
+            double minVal, maxVal;
+            cv::minMaxLoc(DoG, &minVal, &maxVal);
+            double absMax = std::max(std::abs(minVal), std::abs(maxVal));
+            DoG.convertTo(dog_visible, CV_8U, 127.0 / absMax, 128);
+            octave.vis_DoGs.push_back(dog_visible);
+            octave.keypoints.emplace_back();
+            std::cout << "DoG " << idx << " min: " << minVal << " max: " << maxVal << std::endl;
+            // std::cout << "Induvidal vis size " << dog_visible.size() << "\n";
+        }
+        octaves.push_back(octave);
     }
 
     // Keypoint detection
@@ -446,7 +421,7 @@ int main()
                 continue;
             }
 
-            auto kpts = octave.keypoints[idx];
+            auto& kpts = octave.keypoints[idx];
             std::vector<cv::KeyPoint> new_keypoints;
             new_keypoints.reserve(kpts.size());
 
@@ -548,6 +523,7 @@ int main()
                     std::println("Theta deg {}", theta_refined_deg);
                     assert((theta_refined_deg <= 360.0 && theta_refined_deg >= 0));
                     kpt.angle = theta_refined_deg;
+                    kpt.size = blur_img.cols / 20; // just so its actually visible 
                     new_keypoints.push_back(kpt);
                 }
             }
@@ -571,7 +547,45 @@ int main()
     //     imshow(std::format("dog Size {}", hconcated[i].size().width), dogs_hconcated[i]);
     // }
 
-    cv::imshow("Original", images[0]);
+    cv::imshow("Original", img);
     waitKey(0);
+
+    return octaves;
+}
+
+
+std::vector<std::vector<Octave>> run_SIFT_batch(std::vector<Mat> images) {
+    std::vector<std::vector<Octave>> result;
+    for (auto &img : images) {
+        result.push_back(run_SIFT(img));
+    }
+    return result;
+}
+
+int main()
+{
+
+    std::cout << "Hello" << std::endl;
+    std::vector<cv::String> fn;
+    glob("images/small*", fn, false);
+    // glob("images/gator*", fn, false);
+
+    std::vector<Mat> images;
+    size_t count = fn.size();
+    for (size_t i = 0; i < count; i++)
+    {
+        std::cout << "Reading image at " << fn[i] << "\n";
+        Mat img = imread(fn[i]);
+        images.push_back(img);
+        // std::vector<cv::KeyPoint> test{};
+        // test.emplace_back(KeyPoint(Point2f(500, 500), img.cols / 20, 90, 0, 2));
+        // drawKeypoints(img, test, img, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+        // cv::imwrite("angle?.png", img);
+        // exit(9);
+    }
+
+    std::cout << "Images.size " << images.size() << "\n";
+    std::vector<std::vector<Octave>> octaves = run_SIFT_batch(images);
+
     return 0;
 }
