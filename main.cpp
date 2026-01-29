@@ -99,6 +99,15 @@ std::pair<Vector3d, Matrix3d> calcGradWHessian(const Mat &img, const Mat &above,
     return std::make_pair(Gradient, Hessian);
 }
 
+// for negative indexing
+template <class Vec>
+decltype(auto) py_idx(Vec& v, int i) {
+    i += v.size();
+    i %= v.size();
+    return v.at(i);
+}
+
+
 int main()
 {
 
@@ -116,7 +125,10 @@ int main()
     }
 
     std::cout << "Images.size " << images.size() << "\n";
-    std::vector<Octave> octaves;
+    std::vector<std::vector<Octave>> octaves;
+
+
+
     // compute blurs for each image
     for (int i = 0; i < images.size(); i++)
     {
@@ -441,10 +453,11 @@ int main()
             for (auto &kpt : kpts)
             {
                 // does lose refinement (i.e 100.5) but needed to access pixels
-                int x = kpt.pt.x;
-                int y = kpt.pt.y;
+                int x = std::round(kpt.pt.x);
+                int y = std::round(kpt.pt.y);
                 // 1.5 is taken from paper (Lowe 2004)
-                double weight_sigma = 1.5 * kpt.size;
+                // use sigmas stored previously, .size is like essentially just z coord, not how much it was blurred (though related)
+                double weight_sigma = 1.5 * octave.sigmas[idx];
                 int radius = std::round(weight_sigma * 3.0); // 3 std dev is enough
                 std::array<double, 36> orientation_hist{};   // each bin is 10 deg and 36 * 10 = 360
 
@@ -462,14 +475,15 @@ int main()
                         double grad_y = (blur_img.at<double>(y + dy + 1, x + dx) - blur_img.at<double>(y + dy - 1, x + dx)) / 2.0;
                         double mag = std::hypot(grad_y, grad_x);
                         double orientation = std::atan2(grad_y, grad_x) + pi; // get it in [0, 2pi]
-                        double orientation_deg = orientation * 180.0 / pi;
+                        double orientation_deg = angles::to_degrees(orientation);
 
                         // $$ w_{\text{spatial}}(x, y) = \exp\left(-\frac{(x - x_k)^2 + (y - y_k)^2}{2\sigma_w^2}\right) $$
 
                         // $$ \sigma_w = 1.5 \times \sigma_{\text{keypoint}} $$
-                        int bin = (orientation / pi) * 36.0;
+                        int bin = (orientation / (2.0 * pi)) * 36.0;
                         if (bin == 36)
                             bin = 0;
+                        bool DEBUG_added_to_bin = false;
                         for (auto bin_idx : {bin - 1, bin, bin + 1})
                         {
                             bin_idx += 36; // don't get trolled by bin_idx = -1 and do -1 % 36
@@ -477,14 +491,18 @@ int main()
                             auto mid_angle_deg = (bin_idx + 1) * 10 - 5; // angle between this bin and the next (5, 15, 25, etc)
                             auto mid_angle_rad = angles::from_degrees(mid_angle_deg);
                             auto weight_gaussian = exp(-(pow(dx, 2) + pow(dy, 2)) / (2.0 * pow(weight_sigma, 2))); // closer pixels contribute more
-                            // last term is basically farther from actual angle means less weight with a +- of 1 bucket (10 deg)
-                            auto to_add = mag * weight_gaussian * (1 - (std::abs(angles::shortest_angular_distance(orientation, mid_angle_rad))) 
+                            auto bin_weighting = (1 - (std::abs(angles::shortest_angular_distance(orientation, mid_angle_rad))) 
                                                                             / angles::from_degrees(10.0));
+                            // last term is basically farther from actual angle means less weight with a +- of 1 bucket (10 deg)
+                            auto to_add = mag * weight_gaussian * bin_weighting;
                             
                             // check more than 0 bcs third term above could be negative
-                            if (to_add > 0)
+                            if (to_add > 0) {
                                 orientation_hist[bin_idx] += to_add;
+                                DEBUG_added_to_bin = true;
+                            }
                         }
+                        assert(DEBUG_added_to_bin);
                     }
                 }
                 auto arr_enum = orientation_hist | std::views::enumerate;
@@ -495,27 +513,47 @@ int main()
                 size_t max_idx = std::get<0>(*max_it);
 
 
-                std::vector<std::tuple<int, double>> remaining_results = {};
+                std::vector<std::tuple<int, double>> results = {};
                 
                 const auto max_percent = 0.8; // 80 % of max also considered valid orientation for keypoint
-                std::copy_if(arr_enum.begin(), arr_enum.end(), std::back_inserter(remaining_results), [max_percent, max_val](std::tuple<int, double> a)
-                                               { return std::get<1>(a) > max_percent * max_val; });
+                const auto& h = orientation_hist;
 
+                // @todo could add check for local max so don't get like three bins in a row that are above >80%
+                std::copy_if(arr_enum.begin(), arr_enum.end(), std::back_inserter(results), [&](std::tuple<int, double> a)
+                                               {const int idx = std::get<0>(a);
+                                                const double val = std::get<1>(a);
+                                                return ((val >= max_percent * max_val) && 
+                                                        (py_idx(h, idx-1) < val) && 
+                                                        (py_idx(h, idx+1) < val)); });
+
+                
+                // if (results.size() > 1) std::println("Found at least one 80% keypoint in image");
                 // refine bin using left and right ones (i.e can do better than just bin 4, using bins 5 and 3)
                 
                 // $$ \Delta b = \frac{h[b-1] - h[b+1]}{2(h[b-1] - 2h[b] + h[b+1])} $$
                 
                 // $$ \theta_{\text{refined}} = (b + \Delta b) \cdot 10° = (b + \Delta b) \cdot \frac{\pi}{18} $$ 
                 
-                const auto& h = orientation_hist;
-                const auto dBinNum = h[max_idx-1] - h[max_idx+1];
-                const auto dBinDenom = 2.0 * (h[max_idx-1] - 2.0*h[max_idx] + h[max_idx+1]); 
-                const auto dBin = dBinNum / dBinDenom;
-                const auto theta_refined = (max_idx + dBin) * (pi / 18.0);
 
-                kpt.angle = theta_refined;
-                new_keypoints.push_back(kpt);
+                for (auto result : results) {
+                    auto b = std::get<0>(result); // idx
+                    b += 36; // don't get trolled by b = -1 and do -1 % 36
+                    b %= 36;
+                    const auto dBinNum = h[b-1] - h[b+1];
+                    const auto dBinDenom = 2.0 * (h[b-1] - 2.0*h[b] + h[b+1]); 
+                    const auto dBin = dBinNum / dBinDenom;
+                    const auto dBin_clamped = std::clamp(dBin, -0.5, 0.5);
+                    assert (dBin == dBin_clamped); 
+                    const auto theta_refined_deg = (b + dBin) * (10.0);
+                    std::println("Theta deg {}", theta_refined_deg);
+                    assert((theta_refined_deg <= 360.0 && theta_refined_deg >= 0));
+                    kpt.angle = theta_refined_deg;
+                    new_keypoints.push_back(kpt);
+                }
             }
+            
+            std::println("Previous keypoints size {}, new size {} ", kpts.size(), new_keypoints.size());
+            kpts = std::move(new_keypoints);
         }
     }
 

@@ -1,3 +1,4 @@
 {
-    "C_Cpp.default.compilerPath": "/usr/bin/g++-14"
+    "C_Cpp.default.compilerPath": "/usr/bin/g++-14",
+    "comment-formula.mode": "view"
 }
