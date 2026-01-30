@@ -48,7 +48,7 @@ std::pair<std::vector<Mat>, std::vector<Mat>> drawKeypointsAndCombine(std::vecto
             }
             if (octaves[i].keypoints[idx].size() > 0)
             {
-                std::println("Angle for kypt {}", octaves[i].keypoints[idx][0].angle); 
+                std::println("Angle for kypt {}", octaves[i].keypoints[idx][0].angle);
                 drawKeypoints(img, octaves[i].keypoints[idx], img, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
             }
         }
@@ -102,14 +102,15 @@ std::pair<Vector3d, Matrix3d> calcGradWHessian(const Mat &img, const Mat &above,
 
 // for negative indexing
 template <class Vec>
-decltype(auto) py_idx(Vec& v, int i) {
+decltype(auto) py_idx(Vec &v, int i)
+{
     i += v.size();
     i %= v.size();
     return v.at(i);
 }
 
-
-std::vector<Octave> run_SIFT(Mat img) {
+std::vector<Octave> run_SIFT(Mat img)
+{
 
     CV_Assert(img.channels() == 3);
 
@@ -121,10 +122,10 @@ std::vector<Octave> run_SIFT(Mat img) {
     double sigma_inital = 1.6;
     double k = pow(2, (1.0 / scales)); // multipler between levels, so that you
     std::cout << "Num octaves " << num_octaves << " Sigma inital " << sigma_inital
-                << " K " << k << "\n"
-                << "Image size " << img.size()
-                << "\n";
-    
+              << " K " << k << "\n"
+              << "Image size " << img.size()
+              << "\n";
+
     std::vector<Octave> octaves;
     for (int octave_idx = 0; octave_idx < num_octaves - 1; octave_idx++)
     {
@@ -421,7 +422,7 @@ std::vector<Octave> run_SIFT(Mat img) {
                 continue;
             }
 
-            auto& kpts = octave.keypoints[idx];
+            auto &kpts = octave.keypoints[idx];
             std::vector<cv::KeyPoint> new_keypoints;
             new_keypoints.reserve(kpts.size());
 
@@ -466,13 +467,13 @@ std::vector<Octave> run_SIFT(Mat img) {
                             auto mid_angle_deg = (bin_idx + 1) * 10 - 5; // angle between this bin and the next (5, 15, 25, etc)
                             auto mid_angle_rad = angles::from_degrees(mid_angle_deg);
                             auto weight_gaussian = exp(-(pow(dx, 2) + pow(dy, 2)) / (2.0 * pow(weight_sigma, 2))); // closer pixels contribute more
-                            auto bin_weighting = (1 - (std::abs(angles::shortest_angular_distance(orientation, mid_angle_rad))) 
-                                                                            / angles::from_degrees(10.0));
+                            auto bin_weighting = (1 - (std::abs(angles::shortest_angular_distance(orientation, mid_angle_rad))) / angles::from_degrees(10.0));
                             // last term is basically farther from actual angle means less weight with a +- of 1 bucket (10 deg)
                             auto to_add = mag * weight_gaussian * bin_weighting;
-                            
+
                             // check more than 0 bcs third term above could be negative
-                            if (to_add > 0) {
+                            if (to_add > 0)
+                            {
                                 orientation_hist[bin_idx] += to_add;
                                 DEBUG_added_to_bin = true;
                             }
@@ -487,49 +488,188 @@ std::vector<Octave> run_SIFT(Mat img) {
                 auto max_val = std::get<1>(*max_it);
                 size_t max_idx = std::get<0>(*max_it);
 
-
                 std::vector<std::tuple<int, double>> results = {};
-                
+
                 const auto max_percent = 0.8; // 80 % of max also considered valid orientation for keypoint
-                const auto& h = orientation_hist;
+                const auto &h = orientation_hist;
 
                 // @todo could add check for local max so don't get like three bins in a row that are above >80%
                 std::copy_if(arr_enum.begin(), arr_enum.end(), std::back_inserter(results), [&](std::tuple<int, double> a)
-                                               {const int idx = std::get<0>(a);
+                             {const int idx = std::get<0>(a);
                                                 const double val = std::get<1>(a);
                                                 return ((val >= max_percent * max_val) && 
                                                         (py_idx(h, idx-1) < val) && 
                                                         (py_idx(h, idx+1) < val)); });
 
-                
                 // if (results.size() > 1) std::println("Found at least one 80% keypoint in image");
                 // refine bin using left and right ones (i.e can do better than just bin 4, using bins 5 and 3)
-                
-                // $$ \Delta b = \frac{h[b-1] - h[b+1]}{2(h[b-1] - 2h[b] + h[b+1])} $$
-                
-                // $$ \theta_{\text{refined}} = (b + \Delta b) \cdot 10° = (b + \Delta b) \cdot \frac{\pi}{18} $$ 
-                
 
-                for (auto result : results) {
+                // $$ \Delta b = \frac{h[b-1] - h[b+1]}{2(h[b-1] - 2h[b] + h[b+1])} $$
+
+                // $$ \theta_{\text{refined}} = (b + \Delta b) \cdot 10° = (b + \Delta b) \cdot \frac{\pi}{18} $$
+
+                for (auto result : results)
+                {
                     auto b = std::get<0>(result); // idx
-                    b += 36; // don't get trolled by b = -1 and do -1 % 36
+                    b += 36;                      // don't get trolled by b = -1 and do -1 % 36
                     b %= 36;
-                    const auto dBinNum = h[b-1] - h[b+1];
-                    const auto dBinDenom = 2.0 * (h[b-1] - 2.0*h[b] + h[b+1]); 
+                    const auto dBinNum = h[b - 1] - h[b + 1];
+                    const auto dBinDenom = 2.0 * (h[b - 1] - 2.0 * h[b] + h[b + 1]);
                     const auto dBin = dBinNum / dBinDenom;
                     const auto dBin_clamped = std::clamp(dBin, -0.5, 0.5);
-                    assert (dBin == dBin_clamped); 
+                    assert(dBin == dBin_clamped);
                     const auto theta_refined_deg = (b + dBin) * (10.0);
                     std::println("Theta deg {}", theta_refined_deg);
                     assert((theta_refined_deg <= 360.0 && theta_refined_deg >= 0));
                     kpt.angle = theta_refined_deg;
-                    kpt.size = blur_img.cols / 20; // just so its actually visible 
+                    kpt.size = blur_img.cols / 20; // just so its actually visible
                     new_keypoints.push_back(kpt);
                 }
             }
-            
+
             std::println("Previous keypoints size {}, new size {} ", kpts.size(), new_keypoints.size());
             kpts = std::move(new_keypoints);
+        }
+    }
+
+    // now want to actually calculate the feature descriptor, this will be 128d vector that can be used to easily compare against other descriptors
+    // idea is simmilar to orientation finder, want to calc gradient magnitude and orientation for each pixel in a radius, 16x16 seems to be used
+    // but should be relative to the sigma of the blurred image.
+
+    // then you find the relative angle by subtracting the angle calculated above from the angle just found, i.e orientation - Kpt.angle
+    // then rotate each delta pixel to which bins it would have landed in
+    // i.e at pixel (4,5) relative to keypoint, usual rotation formula to get x_rotated and y_rotated
+    // then figure out which bin that should be assigned to
+
+    // then want to "bin" the results based on both where the pixel is (in the rotated frame), common to use 4x4 x8 bin
+    // 4x4 accounts for the pixels (16x16), and  the 8 is bins of 45deg. Don't care for smaller bins because
+    // thats the hard part and the rest is pretty easy once all that works
+
+    // 4x4x8 array where 4x4 is for pixel location, 8 is angles 0-360 in 45 degree increments.
+
+    constexpr int NUM_SPATIAL_BINS = 4;
+    constexpr int NUM_ANGULAR_BINS = 8; // 45 deg increments
+
+    for (auto &octave : octaves)
+    {
+        for (auto [idx, blur_img] : octave.blurs | enumerate)
+        {
+            // keypoints array already has 5 elements here
+            // - 2 comes -1 from size being 1 indexed, -1 from the last element of DoGs doesn't have keypoints since no image to right
+            if (idx == 0 || idx >= octave.DoGs.size() - 1)
+            {
+                continue;
+            }
+
+            auto &kpts = octave.keypoints[idx];
+            for (auto &kpt : kpts)
+            {
+                std::array<std::array<std::array<double, 8>, NUM_SPATIAL_BINS>, NUM_SPATIAL_BINS> descriptor{};
+
+                int x = std::round(kpt.pt.x);
+                int y = std::round(kpt.pt.y);
+
+
+                const double bin_px_size = 3.0 * octave.sigmas[idx];
+
+                // need the sqrt2 and others to account for worse case rotation (45 deg) and make sure we compute pixels there
+                const int radius = bin_px_size * sqrt(2) * ((NUM_SPATIAL_BINS + 1) / 2.0);
+
+                if (x - radius < 0 || x + radius >= blur_img.cols || y - radius < 0 || y + radius >= blur_img.rows)
+                {
+                    std::println("Leaving behind kpt due to orientation going out of bounds");
+                    continue;
+                }
+
+                // yes is square, gaussian weighting means so far out does nothing essentially
+                for (auto dx : views::iota(-radius, radius + 1))
+                {
+                    for (auto dy : views::iota(-radius, radius + 1))
+                    {
+                        // same as above
+                        const double grad_x = (blur_img.at<double>(y + dy, x + dx + 1) - blur_img.at<double>(y + dy, x + dx - 1)) / 2.0;
+                        const double grad_y = (blur_img.at<double>(y + dy + 1, x + dx) - blur_img.at<double>(y + dy - 1, x + dx)) / 2.0;
+                        const double mag = std::hypot(grad_y, grad_x);
+                        const double orientation = std::atan2(grad_y, grad_x) + pi; // get it in [0, 2pi]
+
+                        const double theta = angles::from_degrees(kpt.angle);
+                        // should keypoint rotation proof, hopefully
+                        // only use this for determining which rotation bin it goes in, not rotating to determine spatial bin
+                        const double relative_angle = orientation - theta;
+                        const double relative_angle_deb = angles::to_degrees(relative_angle);
+
+                        // now need to transform dx dy into rotated coords
+
+                        // $ x_{\text{rot}} = \frac{dx \cos\theta - dy \sin\theta}{w_{\text{bin}}}$  $ y_{\text{rot}} = \frac{dx \sin\theta + dy \cos\theta}{w_{\text{bin}}} $
+
+                        const double dx_rot = (dx * cos(theta) - dy * sin(theta)) / bin_px_size;
+                        const double dy_rot = (dx * sin(theta) + dy * cos(theta)) / bin_px_size;
+
+                        // now need to figure out which bin that should go into'
+                        // nice claude diagram explaning
+                        /*
+                      -0.5      0.5      1.5      2.5      3.5
+                        │        │        │        │        │
+                        ▼        ▼        ▼        ▼        ▼
+                        ┌────────┬────────┬────────┬────────┐
+                        │        │        │        │        │
+                        │ bin 0  │ bin 1  │ bin 2  │ bin 3  │
+                        │        │        │        │        │
+                        └────────┴────────┴────────┴────────┘
+                                          ▲
+                                        keypoint
+                                        (x_bin = 1.5)
+                        */
+                        // dx_rot in range (-2 * bin_px_size -> 2 * bin_px_size)
+                        // take out bin_px_size and shift right for indexing
+                        // likley inspired by opencv impl but seems resonable to take the same path
+                        // bins in range [-0.5, 3.5]
+                        const double x_bin_cont = (dx_rot / bin_px_size) + 1.5;
+                        const double y_bin_cont = (dy_rot / bin_px_size) + 1.5;
+                        const double theta_bin_cont = relative_angle * (NUM_ANGULAR_BINS / (2.0 * pi));
+
+                        // sigma = 2 bin widths so 2o^2 = 8
+                        const double gaussian_weight = exp(-(pow(dx_rot, 2) + pow(dy_rot, 2)) / 8.0);
+                        const double max_contribution = mag * gaussian_weight;
+                        double fractional_contribution = 0; // going to check that we do interpolation correctly
+
+                        // trilinear interpolation, a result could end up contributing to 8 cells
+                        const int x_bin = floor(x_bin_cont);
+                        const int y_bin = floor(y_bin_cont);
+                        const int theta_bin = floor(theta_bin_cont);
+
+                        const double x_bin_frac = x_bin_cont - x_bin;
+                        const double y_bin_frac = y_bin_cont - y_bin;
+                        const double theta_bin_frac = theta_bin_cont - theta_bin;
+                        // by flooring and checking +0 and +1 you get both sides that the point could contribute to
+                        for (auto dx_bin : {0, 1})
+                        {
+                            for (auto dy_bin : {0, 1})
+                            {
+                                for (auto dtheta_bin : {0, 1})
+                                {
+                                    const int x_test_bin = x_bin + dx_bin;
+                                    const int y_test_bin = y_bin + dy_bin;
+                                    // just a useful note that this fails if theta_bin + dtheta_bin < -8 
+                                    const int theta_test_bin = ((theta_bin + dtheta_bin) + NUM_ANGULAR_BINS) % NUM_ANGULAR_BINS;
+                                    if (x_test_bin < 0 || y_test_bin < 0 || x_test_bin > NUM_SPATIAL_BINS-1 || y_test_bin > NUM_SPATIAL_BINS-1) {
+                                        continue;
+                                    }
+                                    const double x_w = (dx_bin == 0) ? 1 - x_bin_frac : x_bin_frac; 
+                                    const double y_w = (dy_bin == 0) ? 1 - y_bin_frac : y_bin_frac; 
+                                    const double theta_w = (dtheta_bin == 0) ? 1 - theta_bin_frac : theta_bin_frac; 
+                                    assert(x_w < 1 && y_w < 1 && theta_w < 1); 
+                                    const double to_add = max_contribution * x_w * y_w * theta_w;
+                                    assert(to_add >= 0); 
+                                    descriptor.at(y_test_bin).at(x_test_bin).at(theta_test_bin) += to_add;
+                                    fractional_contribution += to_add;
+                                }
+                            }
+                        }
+                        assert(max_contribution + std::numeric_limits<double>::epsilon() >= fractional_contribution);
+                    }
+                }
+            }
         }
     }
 
@@ -553,10 +693,11 @@ std::vector<Octave> run_SIFT(Mat img) {
     return octaves;
 }
 
-
-std::vector<std::vector<Octave>> run_SIFT_batch(std::vector<Mat> images) {
+std::vector<std::vector<Octave>> run_SIFT_batch(std::vector<Mat> images)
+{
     std::vector<std::vector<Octave>> result;
-    for (auto &img : images) {
+    for (auto &img : images)
+    {
         result.push_back(run_SIFT(img));
     }
     return result;
