@@ -17,8 +17,14 @@ using namespace Eigen;
 using std::numbers::pi;
 // using std::println;
 
+constexpr double EDGE_THRESHOLD = 10.0; // for determine straight lines
+constexpr double THRESHOLD = 0.03;      // from the guys paper, can tune
+constexpr double SCALES = 3.0;
+constexpr double SIGMA_INITAL = 1.6;
+
 struct Octave
 {
+    int level; // used to recover actual keypoint positions at the end (x * 2^level, y * 2^level).
     std::vector<Mat> blurs;
     std::vector<Mat> DoGs;
     std::vector<Mat> vis_DoGs;
@@ -100,7 +106,7 @@ std::pair<Vector3d, Matrix3d> calcGradWHessian(const Mat &img, const Mat &above,
     return std::make_pair(Gradient, Hessian);
 }
 
-// for negative indexing
+// for wraparound indexing
 template <class Vec>
 decltype(auto) py_idx(Vec &v, int i)
 {
@@ -109,7 +115,7 @@ decltype(auto) py_idx(Vec &v, int i)
     return v.at(i);
 }
 
-std::vector<Octave> run_SIFT(Mat img)
+std::pair<std::vector<std::array<double, 128>>, std::vector<Octave>> run_SIFT(Mat img)
 {
 
     CV_Assert(img.channels() == 3);
@@ -117,47 +123,71 @@ std::vector<Octave> run_SIFT(Mat img)
     cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
     img.convertTo(img, CV_64F, 1.0 / 255.0);
     std::cout << "Type: " << type2str(img.type()) << std::endl;
-    double scales = 3.0;
-    double num_octaves = floor(log2(std::min(img.size().width, img.size().height)));
-    double sigma_inital = 1.6;
-    double k = pow(2, (1.0 / scales)); // multipler between levels, so that you
-    std::cout << "Num octaves " << num_octaves << " Sigma inital " << sigma_inital
+    const double num_octaves = floor(log2(std::min(img.size().width, img.size().height)));
+    const double num_cv_octaves = cvRound(std::log((double)std::min(img.cols, img.rows)) / std::log(2.) - 2) - -1.0;
+    assert(num_octaves == num_cv_octaves);
+    const double k = pow(2, (1.0 / SCALES)); // multipler between levels, so that you
+    std::cout << "Num octaves " << num_octaves << " Sigma inital " << SIGMA_INITAL
               << " K " << k << "\n"
               << "Image size " << img.size()
               << "\n";
 
     std::vector<Octave> octaves;
-    for (int octave_idx = 0; octave_idx < num_octaves - 1; octave_idx++)
+
+    const Mat base_img = img.clone();
+    double sigma_prev;
+    // do actually want to start at -1, will upscale the image by 2x
+    for (int octave_idx = -1; octave_idx < num_octaves - 1; octave_idx++)
     {
         Octave octave;
-        Mat base_img;
+        Mat tmp_img;
 
-        if (octave_idx == 0)
+        // got like 300 free keypoints by scaling up by 2 now only 200 under opencv
+        if (octave_idx == -1)
         {
-            base_img = img.clone();
+            resize(base_img, tmp_img, Size(img.cols * 2, img.rows * 2), 0, 0, INTER_LINEAR);
+            sigma_prev = 1.0; // first image
         }
         else
         {
+            if (octave_idx == 0)
+            {
+                sigma_prev = 0.5; // -1 was upscaled by 2x
+            }
+            else
+            {
+                sigma_prev = SIGMA_INITAL;
+            }
             // should be at the blur level of 2x the original, then downsample by 2x to get back to 1.6 sigma
-            auto prev_blurs = octaves[octave_idx - 1].blurs;
+            auto prev_blurs = octaves.back().blurs;
             auto inital = prev_blurs[prev_blurs.size() - 3];
-            pyrDown(inital, base_img);
+            pyrDown(inital, tmp_img);
             std::cout << "base Type: " << type2str(inital.type()) << std::endl;
         }
 
-        if (base_img.size().height < 16 || base_img.size().width < 16)
+        if (tmp_img.size().height < 16 || tmp_img.size().width < 16)
         {
             std::cout << "Image too small, breaking out\n";
             break;
         }
 
-        for (int scale_idx = 0; scale_idx < scales + 3; scale_idx++)
+        for (int scale_idx = 0; scale_idx < SCALES + 3; scale_idx++)
         {
-            double sigma = sigma_inital * pow(k, scale_idx);
+            double sigma_target = SIGMA_INITAL * pow(k, scale_idx);
             Mat blurred_img;
-            GaussianBlur(base_img, blurred_img, Size(0, 0), sigma);
+            
+            if (scale_idx == 0 && sigma_target <= sigma_prev + 1e-6) {
+                blurred_img = tmp_img.clone();
+            } else if (scale_idx == 0) {
+                double sig_diff = sqrt(sigma_target * sigma_target - sigma_prev * sigma_prev);
+                GaussianBlur(tmp_img, blurred_img, Size(0, 0), sig_diff, sig_diff);
+            } else {
+                double sig_prev_level = SIGMA_INITAL * pow(k, scale_idx - 1);
+                double sig_diff = sqrt(sigma_target * sigma_target - sig_prev_level * sig_prev_level);
+                GaussianBlur(octave.blurs.back(), blurred_img, Size(0, 0), sig_diff, sig_diff);
+            }
             octave.blurs.push_back(blurred_img);
-            octave.sigmas.emplace_back(sigma);
+            octave.sigmas.emplace_back(sigma_target);
         }
 
         // leave out the first and last element because
@@ -250,77 +280,6 @@ std::vector<Octave> run_SIFT(Mat img)
     Mat all_blurs = vstackDiffWidths(hconcated);
     cv::imwrite("all_keypoints_pre_edge_det.png", all_blurs);
 
-    // filtering keypoints, based on strenght of response, as well as if its on a line (i.e curvature along x or y is very diff. than the other)
-    /*
-    Compute at each keypoint: (thanks claude)
-        Dxx = DoG(x+1, y) - 2*DoG(x, y) + DoG(x-1, y)
-        Dyy = DoG(x, y+1) - 2*DoG(x, y) + DoG(x, y-1)
-        Dxy = (DoG(x+1, y+1) - DoG(x-1, y+1) - DoG(x+1, y-1) + DoG(x-1, y-1)) / 4
-
-        Then:
-
-        Tr = Dxx + Dyy
-        Det = Dxx * Dyy - Dxy * Dxy
-
-        Reject if:
-
-        Det <= 0 (saddle point or flat — not a blob)
-        Tr² / Det > 12.1 (edge-like, using r=10)
-
-        12.1 comes from
-        Tr2​/det=λ1​λ2​(λ1​+λ2​)2​=r(r+1)2​ with r=10
-    */
-    double threshold_ratio = 10.0;
-    double tr_cutoff = pow(threshold_ratio + 1, 2) / threshold_ratio;
-    std::cout << "TR cutoff is " << tr_cutoff << " \n";
-    for (auto &octave : octaves)
-    {
-        for (auto [idx, keypoints] : octave.keypoints | enumerate)
-        {
-            auto inital_len = keypoints.size();
-            size_t removed = std::erase_if(keypoints, [&](const cv::KeyPoint &kpt)
-                                           {
-                                        auto pt = kpt.pt;
-                                        auto x = pt.x;
-                                        auto y = pt.y;
-                                        auto DoG = octave.DoGs[idx]; 
-                                        double Dxx = DoG.at<double>(Point2d(x+1, y)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x-1, y));
-                                        double Dyy = DoG.at<double>(Point2d(x, y+1)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x, y-1));
-                                        double Dxy = (DoG.at<double>(Point2d(x+1, y+1)) - DoG.at<double>(Point2d(x-1, y+1)) - 
-                                                        DoG.at<double>(Point2d(x+1, y-1)) + DoG.at<double>(Point2d(x-1, y-1))) 
-                                                        / 4.0;
-                                        auto Tr = Dxx + Dyy;
-                                        auto Det = Dxx * Dyy - Dxy * Dxy;
-                                        if (Det <= 0) return true;
-                                        if (((Tr * Tr) / Det) > tr_cutoff) return true;
-                                        return false; });
-            if (removed)
-                std::cout << "Edge detection filtered " << removed << " points out of " << inital_len << " \n";
-        }
-    }
-
-    std::tie(hconcated, dogs_hconcated) = drawKeypointsAndCombine(octaves);
-    all_blurs = vstackDiffWidths(hconcated);
-    cv::imwrite("all_keypoints_pre_thresh.png", all_blurs);
-
-    // threshold
-    double threshold = 0.03; // from the guys paper, can tune
-    for (auto &octave : octaves)
-    {
-        for (auto &keypoints : octave.keypoints)
-        {
-            auto inital_len = keypoints.size();
-            for (auto &kpt : keypoints)
-            {
-                // std::cout << "Kpt w Int " << kpt.response << " \n";
-            }
-            size_t removed = std::erase_if(keypoints, [&](cv::KeyPoint p)
-                                           { return std::abs(p.response) < threshold; });
-            if (removed)
-                std::cout << "Filtered " << removed << " points out of " << inital_len << " \n";
-        }
-    }
-
     // now need subpixel refinment, basically imagine point in 3d with the adjacent DoG's above and below
     // you have 26 points around (9 above/below, 8 around), so you have x, y, s (scale, essentially z)
     // you found local a maximum in the keypoint but say in 1d you had
@@ -395,6 +354,9 @@ std::vector<Octave> run_SIFT(Mat img)
                         x += result(0);
                         y += result(1);
                         s = (double)s_idx + result(2);
+                        double interpolated_contrast = std::abs(img.at<double>((int)std::round(y - result(1)), (int)std::round(x - result(0))) + 0.5 * Gradient.dot(result));
+                        if (interpolated_contrast < THRESHOLD)
+                            break;
                         std::println(" to ({}, {}, {})\n", x, y, s);
                         kept.emplace_back(KeyPoint(Point2d(x, y), s, kpt.angle, kpt.response, kpt.octave));
                         break;
@@ -406,6 +368,75 @@ std::vector<Octave> run_SIFT(Mat img)
             keypoints = std::move(kept);
         }
     }
+
+    // filtering keypoints, based on strenght of response, as well as if its on a line (i.e curvature along x or y is very diff. than the other)
+    /*
+    Compute at each keypoint: (thanks claude)
+        Dxx = DoG(x+1, y) - 2*DoG(x, y) + DoG(x-1, y)
+        Dyy = DoG(x, y+1) - 2*DoG(x, y) + DoG(x, y-1)
+        Dxy = (DoG(x+1, y+1) - DoG(x-1, y+1) - DoG(x+1, y-1) + DoG(x-1, y-1)) / 4
+
+        Then:
+
+        Tr = Dxx + Dyy
+        Det = Dxx * Dyy - Dxy * Dxy
+
+        Reject if:
+
+        Det <= 0 (saddle point or flat — not a blob)
+        Tr² / Det > 12.1 (edge-like, using r=10)
+
+        12.1 comes from
+        Tr2​/det=λ1​λ2​(λ1​+λ2​)2​=r(r+1)2​ with r=10
+    */
+    double tr_cutoff = pow(EDGE_THRESHOLD + 1, 2) / EDGE_THRESHOLD;
+    std::cout << "TR cutoff is " << tr_cutoff << " \n";
+    for (auto &octave : octaves)
+    {
+        for (auto [idx, keypoints] : octave.keypoints | enumerate)
+        {
+            auto inital_len = keypoints.size();
+            size_t removed = std::erase_if(keypoints, [&](const cv::KeyPoint &kpt)
+                                           {
+                                        auto pt = kpt.pt;
+                                        auto x = pt.x;
+                                        auto y = pt.y;
+                                        auto DoG = octave.DoGs[idx]; 
+                                        double Dxx = DoG.at<double>(Point2d(x+1, y)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x-1, y));
+                                        double Dyy = DoG.at<double>(Point2d(x, y+1)) - 2 * DoG.at<double>(pt) + DoG.at<double>(Point2d(x, y-1));
+                                        double Dxy = (DoG.at<double>(Point2d(x+1, y+1)) - DoG.at<double>(Point2d(x-1, y+1)) - 
+                                                        DoG.at<double>(Point2d(x+1, y-1)) + DoG.at<double>(Point2d(x-1, y-1))) 
+                                                        / 4.0;
+                                        auto Tr = Dxx + Dyy;
+                                        auto Det = Dxx * Dyy - Dxy * Dxy;
+                                        if (Det <= 0) return true;
+                                        if (((Tr * Tr) / Det) > tr_cutoff) return true;
+                                        return false; });
+            if (removed)
+                std::cout << "Edge detection filtered " << removed << " points out of " << inital_len << " \n";
+        }
+    }
+
+    std::tie(hconcated, dogs_hconcated) = drawKeypointsAndCombine(octaves);
+    all_blurs = vstackDiffWidths(hconcated);
+    cv::imwrite("all_keypoints_pre_thresh.png", all_blurs);
+
+    // threshold
+    // for (auto &octave : octaves)
+    // {
+    //     for (auto &keypoints : octave.keypoints)
+    //     {
+    //         auto inital_len = keypoints.size();
+    //         for (auto &kpt : keypoints)
+    //         {
+    //             // std::cout << "Kpt w Int " << kpt.response << " \n";
+    //         }
+    //         size_t removed = std::erase_if(keypoints, [&](cv::KeyPoint p)
+    //                                        { return std::abs(p.response) < THRESHOLD; });
+    //         if (removed)
+    //             std::cout << "Filtered " << removed << " points out of " << inital_len << " \n";
+    //     }
+    // }
 
     // now want to find orientation? of keypoints, angle (0-360) that has which direction the pixels are become the most intense
     // idea is that if you took the same image but rotated 45 degrees, the features should still be able to be matched, the orientation allows you to have say
@@ -437,16 +468,28 @@ std::vector<Octave> run_SIFT(Mat img)
                 int radius = std::round(weight_sigma * 3.0); // 3 std dev is enough
                 std::array<double, 36> orientation_hist{};   // each bin is 10 deg and 36 * 10 = 360
 
-                if (x - radius < 0 || x + radius >= blur_img.cols || y - radius < 0 || y + radius >= blur_img.rows)
-                {
-                    std::println("Leaving behind kpt due to orientation going out of bounds");
-                    continue;
-                }
+                // instead of just rejecting a keypoint if the radius goes out of bounds (very bad for small octaves)
+                // just make the range that you sample pixels from smaller rather than give up
+                const int dx_min = std::max(-radius, 1 - x);
+                const int dx_max = std::min(radius, blur_img.cols - x - 2);
+                const int dy_min = std::max(-radius, 1 - y);
+                const int dy_max = std::min(radius, blur_img.rows - y - 2);
 
-                for (auto dx : views::iota(-radius, radius + 1))
+                // the give up strategy, also set iota(-radius, radius+1)
+                // if (x - radius < 1 || x + radius + 1 >= blur_img.cols || y - radius < 1 || y + radius + 1 >= blur_img.rows)
+                // {
+                //     std::println("Leaving behind kpt due to orientation going out of bounds");
+                //     continue;
+                // }
+
+                for (auto dx : views::iota(dx_min, dx_max + 1))
                 {
-                    for (auto dy : views::iota(-radius, radius + 1))
+                    for (auto dy : views::iota(dy_min, dy_max + 1))
                     {
+                        // got trolled by negating already negative number and having start > end in iota, wild stuff ensues
+                        assert(dx <= dx_max && dx >= dx_min);
+                        assert(dy <= dy_max && dy >= dy_min);
+
                         double grad_x = (blur_img.at<double>(y + dy, x + dx + 1) - blur_img.at<double>(y + dy, x + dx - 1)) / 2.0;
                         double grad_y = (blur_img.at<double>(y + dy + 1, x + dx) - blur_img.at<double>(y + dy - 1, x + dx)) / 2.0;
                         double mag = std::hypot(grad_y, grad_x);
@@ -460,16 +503,25 @@ std::vector<Octave> run_SIFT(Mat img)
                         if (bin == 36)
                             bin = 0;
                         bool DEBUG_added_to_bin = false;
+                        if (y == 1172 && x == 2039 && orientation_deg == 63.21652256066082)
+                        {
+                            std::println("Found it!");
+                        }
+                        int mid_angle_deg;
+                        double mid_angle_rad;
+                        double weight_gaussian;
+                        double bin_weighting;
+                        double to_add;
                         for (auto bin_idx : {bin - 1, bin, bin + 1})
                         {
                             bin_idx += 36; // don't get trolled by bin_idx = -1 and do -1 % 36
                             bin_idx %= 36;
-                            auto mid_angle_deg = (bin_idx + 1) * 10 - 5; // angle between this bin and the next (5, 15, 25, etc)
-                            auto mid_angle_rad = angles::from_degrees(mid_angle_deg);
-                            auto weight_gaussian = exp(-(pow(dx, 2) + pow(dy, 2)) / (2.0 * pow(weight_sigma, 2))); // closer pixels contribute more
-                            auto bin_weighting = (1 - (std::abs(angles::shortest_angular_distance(orientation, mid_angle_rad))) / angles::from_degrees(10.0));
+                            mid_angle_deg = (bin_idx + 1) * 10 - 5; // angle between this bin and the next (5, 15, 25, etc)
+                            mid_angle_rad = angles::from_degrees(mid_angle_deg);
+                            weight_gaussian = exp(-(pow(dx, 2) + pow(dy, 2)) / (2.0 * pow(weight_sigma, 2))); // closer pixels contribute more
+                            bin_weighting = (1 - (std::abs(angles::shortest_angular_distance(orientation, mid_angle_rad))) / angles::from_degrees(10.0));
                             // last term is basically farther from actual angle means less weight with a +- of 1 bucket (10 deg)
-                            auto to_add = mag * weight_gaussian * bin_weighting;
+                            to_add = mag * weight_gaussian * bin_weighting;
 
                             // check more than 0 bcs third term above could be negative
                             if (to_add > 0)
@@ -513,12 +565,14 @@ std::vector<Octave> run_SIFT(Mat img)
                     auto b = std::get<0>(result); // idx
                     b += 36;                      // don't get trolled by b = -1 and do -1 % 36
                     b %= 36;
-                    const auto dBinNum = h[b - 1] - h[b + 1];
-                    const auto dBinDenom = 2.0 * (h[b - 1] - 2.0 * h[b] + h[b + 1]);
+                    const auto dBinNum = py_idx(h, b - 1) - py_idx(h, b + 1);
+                    const auto dBinDenom = 2.0 * (py_idx(h, b - 1) - 2.0 * h[b] + py_idx(h, b + 1));
                     const auto dBin = dBinNum / dBinDenom;
                     const auto dBin_clamped = std::clamp(dBin, -0.5, 0.5);
                     assert(dBin == dBin_clamped);
-                    const auto theta_refined_deg = (b + dBin) * (10.0);
+                    auto theta_refined = (b + dBin) * angles::from_degrees(10.0);
+                    theta_refined = angles::normalize_angle_positive(theta_refined);
+                    const auto theta_refined_deg = angles::to_degrees(theta_refined);
                     std::println("Theta deg {}", theta_refined_deg);
                     assert((theta_refined_deg <= 360.0 && theta_refined_deg >= 0));
                     kpt.angle = theta_refined_deg;
@@ -550,6 +604,7 @@ std::vector<Octave> run_SIFT(Mat img)
     constexpr int NUM_SPATIAL_BINS = 4;
     constexpr int NUM_ANGULAR_BINS = 8; // 45 deg increments
 
+    std::vector<std::array<double, 128>> all_descriptors;
     for (auto &octave : octaves)
     {
         for (auto [idx, blur_img] : octave.blurs | enumerate)
@@ -562,13 +617,13 @@ std::vector<Octave> run_SIFT(Mat img)
             }
 
             auto &kpts = octave.keypoints[idx];
+
             for (auto &kpt : kpts)
             {
                 std::array<std::array<std::array<double, 8>, NUM_SPATIAL_BINS>, NUM_SPATIAL_BINS> descriptor{};
 
                 int x = std::round(kpt.pt.x);
                 int y = std::round(kpt.pt.y);
-
 
                 const double bin_px_size = 3.0 * octave.sigmas[idx];
 
@@ -602,8 +657,8 @@ std::vector<Octave> run_SIFT(Mat img)
 
                         // $ x_{\text{rot}} = \frac{dx \cos\theta - dy \sin\theta}{w_{\text{bin}}}$  $ y_{\text{rot}} = \frac{dx \sin\theta + dy \cos\theta}{w_{\text{bin}}} $
 
-                        const double dx_rot = (dx * cos(theta) - dy * sin(theta)) / bin_px_size;
-                        const double dy_rot = (dx * sin(theta) + dy * cos(theta)) / bin_px_size;
+                        const double dx_rot = (dx * cos(theta) - dy * sin(theta));
+                        const double dy_rot = (dx * sin(theta) + dy * cos(theta));
 
                         // now need to figure out which bin that should go into'
                         // nice claude diagram explaning
@@ -650,17 +705,18 @@ std::vector<Octave> run_SIFT(Mat img)
                                 {
                                     const int x_test_bin = x_bin + dx_bin;
                                     const int y_test_bin = y_bin + dy_bin;
-                                    // just a useful note that this fails if theta_bin + dtheta_bin < -8 
+                                    // just a useful note that this fails if theta_bin + dtheta_bin < -8
                                     const int theta_test_bin = ((theta_bin + dtheta_bin) + NUM_ANGULAR_BINS) % NUM_ANGULAR_BINS;
-                                    if (x_test_bin < 0 || y_test_bin < 0 || x_test_bin > NUM_SPATIAL_BINS-1 || y_test_bin > NUM_SPATIAL_BINS-1) {
+                                    if (x_test_bin < 0 || y_test_bin < 0 || x_test_bin > NUM_SPATIAL_BINS - 1 || y_test_bin > NUM_SPATIAL_BINS - 1)
+                                    {
                                         continue;
                                     }
-                                    const double x_w = (dx_bin == 0) ? 1 - x_bin_frac : x_bin_frac; 
-                                    const double y_w = (dy_bin == 0) ? 1 - y_bin_frac : y_bin_frac; 
-                                    const double theta_w = (dtheta_bin == 0) ? 1 - theta_bin_frac : theta_bin_frac; 
-                                    assert(x_w < 1 && y_w < 1 && theta_w < 1); 
+                                    const double x_w = (dx_bin == 0) ? 1 - x_bin_frac : x_bin_frac;
+                                    const double y_w = (dy_bin == 0) ? 1 - y_bin_frac : y_bin_frac;
+                                    const double theta_w = (dtheta_bin == 0) ? 1 - theta_bin_frac : theta_bin_frac;
+                                    assert(x_w < 1 && y_w < 1 && theta_w < 1);
                                     const double to_add = max_contribution * x_w * y_w * theta_w;
-                                    assert(to_add >= 0); 
+                                    assert(to_add >= 0);
                                     descriptor.at(y_test_bin).at(x_test_bin).at(theta_test_bin) += to_add;
                                     fractional_contribution += to_add;
                                 }
@@ -669,10 +725,37 @@ std::vector<Octave> run_SIFT(Mat img)
                         assert(max_contribution + std::numeric_limits<double>::epsilon() >= fractional_contribution);
                     }
                 }
+
+                std::array<double, 128> desc_flat{};
+                std::copy(&descriptor[0][0][0], &descriptor[0][0][0] + 128, desc_flat.begin());
+                auto compute_norm = [](std::array<double, 128> &arr)
+                {
+                    double norm = 0;
+                    for (auto i : arr)
+                    {
+                        norm += pow(i, 2);
+                    }
+                    return sqrt(norm);
+                };
+
+                double norm = compute_norm(desc_flat);
+                // normalize each element
+                std::for_each(desc_flat.begin(), desc_flat.end(), [&norm](double &d)
+                              { d /= norm; });
+
+                std::for_each(desc_flat.begin(), desc_flat.end(), [&norm](double &d)
+                              { d = std::min(d, 0.2); });
+
+                // renormalize after clamp
+                norm = compute_norm(desc_flat);
+                std::for_each(desc_flat.begin(), desc_flat.end(), [&norm](double &d)
+                              { d /= norm; });
+                all_descriptors.push_back(desc_flat);
             }
         }
     }
 
+    std::println(" ");
     // visualize
     std::tie(hconcated, dogs_hconcated) = drawKeypointsAndCombine(octaves);
     all_blurs = vstackDiffWidths(hconcated);
@@ -690,15 +773,33 @@ std::vector<Octave> run_SIFT(Mat img)
     cv::imshow("Original", img);
     waitKey(0);
 
-    return octaves;
+    return std::make_pair(all_descriptors, octaves);
 }
 
 std::vector<std::vector<Octave>> run_SIFT_batch(std::vector<Mat> images)
 {
+    // thresh * scales bcs following
+    /*
+    Note
+    The contrast threshold will be divided by nOctaveLayers when the filtering is applied. When nOctaveLayers is set to default and if you want to use the value used in D. Lowe paper, 0.03, set this argument to 0.09.
+    */
+    auto cv_sift = cv::SIFT::create(0, SCALES, THRESHOLD * SCALES, EDGE_THRESHOLD, SIGMA_INITAL);
     std::vector<std::vector<Octave>> result;
     for (auto &img : images)
     {
-        result.push_back(run_SIFT(img));
+        std::vector<cv::KeyPoint> cv_kpts{};
+        cv::Mat cv_descriptors;
+        cv_sift->detectAndCompute(img, cv::Mat(), cv_kpts, cv_descriptors);
+        auto res = run_SIFT(img);
+        std::println("Num of cv keypoints = {} ", cv_kpts.size());
+        std::println("Num of our keypoints = {} ", res.first.size());
+        cv::Mat output;
+        cv::drawKeypoints(img, cv_kpts, output, cv::Scalar_<double>::all(-1), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+        cv::imwrite("cv_sift_result.jpg", output);
+
+        exit(0);
+
+        // result.push_back(run_SIFT(img));
     }
     return result;
 }
@@ -708,7 +809,7 @@ int main()
 
     std::cout << "Hello" << std::endl;
     std::vector<cv::String> fn;
-    glob("images/small*", fn, false);
+    glob("images/smallorade1*", fn, false);
     // glob("images/gator*", fn, false);
 
     std::vector<Mat> images;
