@@ -150,14 +150,14 @@ std::pair<std::vector<std::array<double, 128>>, std::vector<Octave>> run_SIFT(Ma
         }
         else
         {
-            if (octave_idx == 0)
-            {
-                sigma_prev = 0.5; // -1 was upscaled by 2x
-            }
-            else
-            {
+            // if (octave_idx == 0)
+            // {
+            //     sigma_prev = 0.5; // -1 was upscaled by 2x
+            // }
+            // else
+            // {
                 sigma_prev = SIGMA_INITAL;
-            }
+            // }
             // should be at the blur level of 2x the original, then downsample by 2x to get back to 1.6 sigma
             auto prev_blurs = octaves.back().blurs;
             auto inital = prev_blurs[prev_blurs.size() - 3];
