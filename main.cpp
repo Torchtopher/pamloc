@@ -115,7 +115,7 @@ decltype(auto) py_idx(Vec &v, int i)
     return v.at(i);
 }
 
-std::pair<std::vector<std::array<double, 128>>, std::vector<Octave>> run_SIFT(Mat img)
+std::pair<Mat, std::vector<Octave>> run_SIFT(Mat img)
 {
 
     CV_Assert(img.channels() == 3);
@@ -773,7 +773,12 @@ std::pair<std::vector<std::array<double, 128>>, std::vector<Octave>> run_SIFT(Ma
     cv::imshow("Original", img);
     waitKey(0);
 
-    return std::make_pair(all_descriptors, octaves);
+    // convert from vec of arrays to cv Mat where each row is a desciptor
+    Mat out(all_descriptors.size(), 128, CV_64F, all_descriptors.data());
+    out.convertTo(out, CV_32F);
+    // TODO, return keypoints array that is ordered same as descriptors array...
+    // will likley need to scale keypoints up by sigma (i.e (10, 10) when the image size is only half goes to (20, 20))
+    return std::make_pair(out, octaves);
 }
 
 std::vector<std::vector<Octave>> run_SIFT_batch(std::vector<Mat> images)
@@ -795,6 +800,7 @@ std::vector<std::vector<Octave>> run_SIFT_batch(std::vector<Mat> images)
         std::println("Num of our keypoints = {} ", res.first.size());
         cv::Mat output;
         cv::drawKeypoints(img, cv_kpts, output, cv::Scalar_<double>::all(-1), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+        Ptr<BFMatcher> matcher = cv::BFMatcher::create(cv::NORM_L2);
         cv::imwrite("cv_sift_result.jpg", output);
 
         exit(0);
